@@ -1,0 +1,10 @@
+.build/
+*.o
+*.d
+*.swp
+*.xcodeproj/
+*.xcworkspace/
+.DS_Store
+Connect5.app/
+*.dmg
+*.zip

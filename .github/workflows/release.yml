@@ -1,0 +1,145 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+jobs:
+  build:
+    name: Build macOS App
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Swift version
+        run: swift --version
+
+      # ── Build release binary ──────────────────────────────────────────────
+      - name: Build (release)
+        run: swift build -c release
+
+      # ── Assemble .app bundle ─────────────────────────────────────────────
+      - name: Create .app bundle
+        run: |
+          APP=Connect5.app
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp .build/release/Connect5 "$APP/Contents/MacOS/Connect5"
+          chmod +x "$APP/Contents/MacOS/Connect5"
+
+          cat > "$APP/Contents/Info.plist" << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>     <string>Connect5</string>
+              <key>CFBundleIdentifier</key>     <string>com.user.connect5</string>
+              <key>CFBundleName</key>           <string>Connect5</string>
+              <key>CFBundleDisplayName</key>    <string>Connect 5</string>
+              <key>CFBundleVersion</key>        <string>1.0</string>
+              <key>CFBundleShortVersionString</key> <string>1.0</string>
+              <key>CFBundlePackageType</key>    <string>APPL</string>
+              <key>NSPrincipalClass</key>       <string>NSApplication</string>
+              <key>NSHighResolutionCapable</key><true/>
+              <key>CFBundleIconFile</key>       <string>AppIcon</string>
+              <key>LSMinimumSystemVersion</key> <string>13.0</string>
+              <key>LSApplicationCategoryType</key> <string>public.app-category.games</string>
+          </dict>
+          </plist>
+          EOF
+
+      # ── Generate app icon ─────────────────────────────────────────────────
+      - name: Generate icon
+        run: swift Scripts/make_icon.swift Connect5.app/Contents/Resources/AppIcon.icns
+
+      # ── Ad-hoc sign ───────────────────────────────────────────────────────
+      - name: Sign (ad-hoc)
+        run: |
+          xattr -cr Connect5.app
+          codesign --sign - --force --deep Connect5.app
+
+      # ── Build DMG ─────────────────────────────────────────────────────────
+      - name: Create DMG
+        run: |
+          VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.version }}
+          DMG="Connect5-${VERSION}-macOS.dmg"
+
+          # Staging folder
+          mkdir -p dmg_staging
+          cp -r Connect5.app dmg_staging/
+          ln -s /Applications dmg_staging/Applications
+
+          # Create writable image
+          hdiutil create \
+            -volname "Connect 5" \
+            -srcfolder dmg_staging \
+            -ov -format UDRW \
+            /tmp/Connect5-rw.dmg
+
+          # Convert to compressed read-only DMG
+          hdiutil convert /tmp/Connect5-rw.dmg \
+            -format UDZO \
+            -o "$DMG"
+
+          echo "DMG_PATH=$DMG" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # ── Also zip the .app for users who prefer that ───────────────────────
+      - name: Create ZIP
+        run: |
+          ZIP="Connect5-${VERSION}-macOS.zip"
+          ditto -c -k --sequesterRsrc --keepParent Connect5.app "$ZIP"
+          echo "ZIP_PATH=$ZIP" >> "$GITHUB_ENV"
+
+      # ── Upload artifacts (available even on non-tag runs) ─────────────────
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Connect5-macOS
+          path: |
+            ${{ env.DMG_PATH }}
+            ${{ env.ZIP_PATH }}
+          retention-days: 30
+
+      # ── Publish GitHub Release on tag push ────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: "Connect 5 ${{ env.VERSION }}"
+          body: |
+            ## Connect 5 (Gomoku) for macOS
+
+            ### Install
+            1. Download **Connect5-${{ env.VERSION }}-macOS.dmg**
+            2. Open the DMG, drag **Connect5** into **Applications**
+            3. Right-click → Open on first launch (bypasses Gatekeeper for unsigned app)
+
+            ### What's new
+            - Native SwiftUI macOS app
+            - Play vs AI or 2-player local
+            - 15×15 Gomoku board, first to 5 wins
+            - Undo, score tracking, animated stones
+
+            ### Requirements
+            macOS 13 Ventura or later
+          files: |
+            ${{ env.DMG_PATH }}
+            ${{ env.ZIP_PATH }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
